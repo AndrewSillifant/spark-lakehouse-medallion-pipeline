@@ -1,0 +1,79 @@
+apiVersion: hive.stackable.tech/v1alpha1
+kind: HiveCluster
+metadata:
+  name: mdp-hive
+  namespace: md-pipeline
+spec:
+  image:
+    productVersion: "3.1.3"
+  clusterConfig:
+    database:
+      dbType: postgres
+      connString: jdbc:postgresql://mdp-hms-postgres.md-pipeline.svc.cluster.local:5432/hive?connectTimeout=30&socketTimeout=300&loginTimeout=30
+      credentialsSecret: mdp-hms-postgres-secret
+    s3:
+      inline:
+        host: 10.21.227.158  
+        port: 80
+        accessStyle: "Path"
+        credentials:
+          secretClass: "mdp-s3-credentials-class"
+  metastore:
+    roleGroups:
+      default:
+        replicas: 1
+        resources:
+          requests:
+            cpu: "6"
+            memory: "8Gi"
+          limits:
+            cpu: "8"
+            memory: "16Gi"
+        config:
+          # Hive Metastore performance tuning
+          hive-site.xml:
+            # Connection pool settings
+            javax.jdo.option.ConnectionPool.maxPoolSize: "20"
+            javax.jdo.option.ConnectionPool.maxActive: "15"
+            javax.jdo.option.ConnectionPool.maxIdle: "5"
+            javax.jdo.option.ConnectionPool.minIdle: "2"
+            javax.jdo.option.ConnectionTimeout: "30000"
+            javax.jdo.option.ConnectionPoolingType: "DBCP"
+            
+            # Connection validation
+            javax.jdo.option.ConnectionPool.testConnectionOnBorrow: "true"
+            javax.jdo.option.ConnectionPool.testConnectionOnReturn: "false"
+            javax.jdo.option.ConnectionPool.testConnectionWhileIdle: "true"
+            javax.jdo.option.ConnectionPool.timeBetweenEvictionRunsMillis: "30000"
+            javax.jdo.option.ConnectionPool.minEvictableIdleTimeMillis: "60000"
+            
+            # Metastore server settings
+            hive.metastore.server.min.threads: "10"
+            hive.metastore.server.max.threads: "50"
+            hive.metastore.server.tcp.keepalive: "true"
+            
+            # Client timeout settings
+            hive.metastore.client.socket.timeout: "300s"
+            hive.metastore.client.connect.retry.delay: "5s"
+            hive.metastore.failure.retries: "3"
+            
+            # Transaction and locking
+            hive.support.concurrency: "true"
+            hive.exec.dynamic.partition.mode: "nonstrict"
+            hive.txn.manager: "org.apache.hadoop.hive.ql.lockmgr.DbTxnManager"
+            hive.compactor.initiator.on: "true"
+            hive.compactor.worker.threads: "2"
+            
+            # Performance optimization
+            hive.metastore.cache.pinobjtypes: "Table,Database,Type,FieldSchema,Order"
+            hive.metastore.batch.retrieve.max: "500"
+            hive.metastore.batch.retrieve.table.partition.max: "1000"
+            
+            # Statistics
+            hive.stats.autogather: "false"  # Disable for performance
+            hive.compute.query.using.stats: "false"
+            
+        # JVM settings for Hive Metastore
+        env:
+          HADOOP_HEAPSIZE: "6144"
+          HADOOP_OPTS: "-XX:+UseG1GC -XX:MaxGCPauseMillis=200 -XX:G1HeapRegionSize=16m -XX:+UseStringDeduplication -XX:+OptimizeStringConcat -Djava.net.preferIPv4Stack=true"

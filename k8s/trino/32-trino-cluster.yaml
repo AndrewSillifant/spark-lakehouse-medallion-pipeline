@@ -1,0 +1,47 @@
+apiVersion: trino.stackable.tech/v1alpha1
+kind: TrinoCluster
+metadata:
+  name: mdp-trino
+  namespace: md-pipeline
+spec:
+  image:
+    productVersion: "476"
+  # REQUIRED: which TrinoCatalogs to mount
+  clusterConfig:
+    catalogLabelSelector:
+      matchLabels:
+        trino: mdp-trino
+    authentication:
+      - authenticationClass: simple-trino-users
+  coordinators:
+    roleConfig:
+      listenerClass: external-unstable
+    roleGroups:
+      default:
+        replicas: 1
+        resources:
+          requests:
+            cpu: "2"
+            memory: 8Gi
+          limits:
+            cpu: "4"
+            memory: 16Gi
+          storage:
+            data:
+              capacity: 50Gi   # local data/exchange spill; tune as needed
+              storageClassName: vsphere-datastore
+  workers:
+    roleGroups:
+      default:
+        replicas: 8
+        resources:
+          requests:
+            cpu: 200m
+            memory: 2Gi
+          limits:
+            cpu: "4"
+            memory: 2Gi
+          storage:
+            data:
+              capacity: 50Gi    # local data/exchange spill; tune as needed
+              storageClassName: vsphere-datastore

@@ -1,0 +1,106 @@
+# Optimized PostgreSQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mdp-hms-postgres
+  namespace: md-pipeline
+spec:
+  selector:
+    matchLabels:
+      app: mdp-hms-postgres
+  serviceName: mdp-hms-postgres
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: mdp-hms-postgres
+    spec:
+      containers:
+        - name: postgres
+          image: bitnami/postgresql:16
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: mdp-hms-postgres-secret
+          env:
+            # PostgreSQL performance tuning
+            - name: POSTGRESQL_SHARED_PRELOAD_LIBRARIES
+              value: "pg_stat_statements"
+            - name: POSTGRESQL_MAX_CONNECTIONS
+              value: "200"
+            - name: POSTGRESQL_SHARED_BUFFERS
+              value: "16GB"
+            - name: POSTGRESQL_EFFECTIVE_CACHE_SIZE
+              value: "6GB"
+            - name: POSTGRESQL_MAINTENANCE_WORK_MEM
+              value: "512MB"
+            - name: POSTGRESQL_CHECKPOINT_COMPLETION_TARGET
+              value: "0.9"
+            - name: POSTGRESQL_WAL_BUFFERS
+              value: "16MB"
+            - name: POSTGRESQL_DEFAULT_STATISTICS_TARGET
+              value: "100"
+            - name: POSTGRESQL_RANDOM_PAGE_COST
+              value: "1.1"
+            - name: POSTGRESQL_EFFECTIVE_IO_CONCURRENCY
+              value: "200"
+            - name: POSTGRESQL_WORK_MEM
+              value: "32MB"
+            - name: POSTGRESQL_MIN_WAL_SIZE
+              value: "2GB"
+            - name: POSTGRESQL_MAX_WAL_SIZE
+              value: "8GB"
+            # Connection and timeout settings
+            - name: POSTGRESQL_TCP_KEEPALIVES_IDLE
+              value: "600"
+            - name: POSTGRESQL_TCP_KEEPALIVES_INTERVAL
+              value: "30"
+            - name: POSTGRESQL_TCP_KEEPALIVES_COUNT
+              value: "3"
+            - name: POSTGRESQL_STATEMENT_TIMEOUT
+              value: "300000"  # 5 minutes
+          ports:
+            - containerPort: 5432
+              name: postgres
+          volumeMounts:
+            - name: data
+              mountPath: /bitnami/postgresql
+          resources:
+            requests:
+              cpu: "8"
+              memory: "24Gi"
+            limits:
+              cpu: "12"
+              memory: "32Gi"
+          # Health checks
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready -U "hive" -d "hive" -h 127.0.0.1 -p 5432
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - exec pg_isready -U "hive" -d "hive" -h 127.0.0.1 -p 5432
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: vsphere-datastore
+        resources:
+          requests:
+            storage: 200Gi

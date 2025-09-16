@@ -1,0 +1,40 @@
+
+apiVersion: s3.stackable.tech/v1alpha1
+kind: S3Bucket
+metadata:
+  name: mdp-bronze
+  namespace: md-pipeline
+spec:
+  bucketName: mdp-bronze
+  connection:
+    reference: mdp-flashblade
+---
+apiVersion: s3.stackable.tech/v1alpha1
+kind: S3Bucket
+metadata:
+  name: mdp-silver
+  namespace: md-pipeline
+spec:
+  bucketName: mdp-silver
+  connection:
+    reference: mdp-flashblade
+---
+apiVersion: s3.stackable.tech/v1alpha1
+kind: S3Bucket
+metadata:
+  name: mdp-gold
+  namespace: md-pipeline
+spec:
+  bucketName: mdp-gold
+  connection:
+    reference: mdp-flashblade
+---
+apiVersion: s3.stackable.tech/v1alpha1
+kind: S3Bucket
+metadata:
+  name: mdp-checkpoints
+  namespace: md-pipeline
+spec:
+  bucketName: mdp-checkpoints
+  connection:
+    reference: mdp-flashblade

@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mdp-trino-iceberg-metastore
+  namespace: md-pipeline
+data:
+  HIVE: "thrift://mdp-hive-metastore.md-pipeline.svc.cluster.local:9083"

@@ -1,0 +1,49 @@
+apiVersion: trino.stackable.tech/v1alpha1
+kind: TrinoCatalog
+metadata:
+  name: iceberg
+  namespace: md-pipeline
+  labels:
+    trino: mdp-trino
+spec:
+  connector:
+    iceberg:
+      metastore:
+        configMap: mdp-trino-iceberg-metastore
+      properties:
+        connector.name:
+          value: iceberg
+        iceberg.catalog.type:
+          value: hive
+        # Native S3 on (you already have this)
+        fs.native-s3.enabled:
+          value: "true"
+
+        # Your FlashBlade S3 endpoint (HTTP)
+        s3.endpoint:
+          value: "http://10.21.227.158:80"
+        s3.path-style-access:
+          value: "true"
+        s3.region:
+          value: "us-east-1"
+        s3.aws-access-key:
+          valueFromSecret:
+            name: mdp-s3-credentials
+            key: accessKey
+        s3.aws-secret-key:
+          valueFromSecret:
+            name: mdp-s3-credentials
+            key: secretKey
+
+        # IMPORTANT for non-TLS endpoint:
+        s3.ssl.enabled:
+          value: "false"
+
+        hive.metastore-timeout:
+          value: "5m"
+        iceberg.register-table-procedure.enabled:
+          value: "true"
+        s3.max-connections:
+          value: "1024"
+        s3.streaming.part-size:
+          value: "134217728"

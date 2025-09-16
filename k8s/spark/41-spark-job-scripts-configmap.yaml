@@ -1,0 +1,449 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mdp-spark-scripts
+  namespace: md-pipeline
+data:
+  common.py: |
+    import os, time, json, random, string
+    from datetime import datetime, timedelta
+    def log(msg): print("[mdp] {} - {}".format(datetime.utcnow().isoformat(), msg), flush=True)
+    def env(name, default=None):
+        v = os.getenv(name, default)
+        if v is None:
+            raise SystemExit("Missing env var: {}".format(name))
+        return v
+    def parse_size_gb(s): return float(s)
+
+  bronze_ingest.py: |
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col, expr, rand, floor, to_timestamp, concat_ws, sha2, repeat, lit, when
+    from common import log, env, parse_size_gb
+    import time
+
+    bronze_uri   = env("MDP_BRONZE_URI", "s3a://mdp-bronze/")
+    target_gb    = parse_size_gb(env("MDP_INGEST_GB", "1024"))
+    partitions   = int(env("MDP_INGEST_PARTITIONS", "768"))
+    compression  = env("MDP_PARQUET_COMPRESSION", "none")
+    files_mb     = int(env("MDP_TARGET_FILE_MB", "128"))
+    payload_kb   = int(env("MDP_PAYLOAD_KB", "512"))
+    rows_per_mb  = int(env("MDP_ROWS_PER_MB", "2"))
+
+    spark = SparkSession.builder.appName("mdp-bronze-ingest").getOrCreate()
+    start_time = time.time()
+
+    base_row_bytes = 300
+    payload_bytes = payload_kb * 1024
+    estimated_row_bytes = base_row_bytes + payload_bytes
+    target_bytes = target_gb * 1024 * 1024 * 1024
+    rows_total = int(target_bytes / estimated_row_bytes)
+    rows_total = max(rows_total, partitions * 100)
+
+    log("Customer 360 Bronze ingest starting: target={}GB, payload={}KB, rows={}, partitions={}".format(
+        target_gb, payload_kb, rows_total, partitions))
+
+    # Customer 360 raw interaction data
+    base_data = (spark.range(0, rows_total)
+                .withColumn("event_timestamp", expr("date_sub(current_timestamp(), cast(rand() * 30 as int))"))
+                .withColumn("event_id", expr("uuid()"))
+                .withColumn("session_id", expr("uuid()"))
+                
+                # Customer identifiers
+                .withColumn("customer_id", floor(rand() * 500000).cast("long"))
+                .withColumn("email_raw", expr("concat('user', cast(customer_id as string), case when rand() < 0.1 then '.DUPLICATE' else '' end, '@', case when rand() < 0.3 then 'gmail.com' when rand() < 0.5 then 'yahoo.com' when rand() < 0.7 then 'company.com' else 'outlook.com' end)"))
+                .withColumn("phone_raw", expr("case when rand() < 0.8 then concat('(', lpad(cast(rand()*999 as int), 3, '0'), ') ', lpad(cast(rand()*999 as int), 3, '0'), '-', lpad(cast(rand()*9999 as int), 4, '0')) else concat('+1', lpad(cast(rand()*1000000000 as int), 10, '0')) end"))
+                
+                # Transaction data  
+                .withColumn("interaction_type", expr("case when rand() < 0.3 then 'purchase' when rand() < 0.5 then 'browse' when rand() < 0.7 then 'support' when rand() < 0.85 then 'login' else 'abandoned_cart' end"))
+                .withColumn("product_id", expr("concat('PRD', lpad(cast(rand() * 10000 as int), 5, '0'))"))
+                .withColumn("product_category", expr("case when rand() < 0.2 then 'electronics' when rand() < 0.4 then 'clothing' when rand() < 0.6 then 'home_garden' when rand() < 0.8 then 'books' else 'sports' end"))
+                .withColumn("transaction_amount", expr("case when interaction_type = 'purchase' then rand() * 1000 + 10 else 0 end"))
+                .withColumn("currency", expr("case when rand() < 0.7 then 'USD' when rand() < 0.85 then 'EUR' when rand() < 0.95 then 'GBP' else 'CAD' end"))
+                
+                # Channel and device context
+                .withColumn("channel", expr("case when rand() < 0.4 then 'web' when rand() < 0.7 then 'mobile_app' when rand() < 0.85 then 'store' when rand() < 0.95 then 'call_center' else 'social_media' end"))
+                .withColumn("device_type", expr("case when rand() < 0.5 then 'desktop' when rand() < 0.8 then 'mobile' else 'tablet' end"))
+                .withColumn("browser", expr("case when rand() < 0.4 then 'chrome' when rand() < 0.6 then 'safari' when rand() < 0.8 then 'firefox' else 'edge' end"))
+                .withColumn("ip_address", expr("concat(cast(rand() * 255 as int), '.', cast(rand() * 255 as int), '.', cast(rand() * 255 as int), '.', cast(rand() * 255 as int))"))
+                
+                # Geographic data
+                .withColumn("city_raw", expr("case when rand() < 0.1 then 'New York' when rand() < 0.2 then 'NYC' when rand() < 0.3 then 'Los Angeles' when rand() < 0.4 then 'Chicago' when rand() < 0.5 then 'Houston' when rand() < 0.6 then 'Phoenix' when rand() < 0.7 then 'Philadelphia' when rand() < 0.8 then 'San Antonio' when rand() < 0.9 then 'San Diego' else 'Dallas' end"))
+                .withColumn("state_raw", expr("case when rand() < 0.15 then 'CA' when rand() < 0.25 then 'California' when rand() < 0.35 then 'TX' when rand() < 0.45 then 'Texas' when rand() < 0.55 then 'NY' when rand() < 0.65 then 'New York' else 'FL' end"))
+                .withColumn("zip_code", expr("lpad(cast(rand() * 99999 as int), 5, '0')"))
+                
+                # Behavioral metrics
+                .withColumn("page_views", expr("case when interaction_type in ('browse', 'purchase') then cast(rand() * 20 + 1 as int) else 0 end"))
+                .withColumn("time_on_site_seconds", expr("case when page_views > 0 then cast(rand() * 3600 + 30 as int) else 0 end"))
+                .withColumn("bounce_rate", expr("case when page_views = 1 then 1.0 else 0.0 end"))
+                
+                # Customer service data
+                .withColumn("support_ticket_id", expr("case when interaction_type = 'support' then concat('TKT', cast(rand() * 100000 as int)) else null end"))
+                .withColumn("issue_category", expr("case when support_ticket_id is not null then case when rand() < 0.3 then 'billing' when rand() < 0.6 then 'technical' else 'general_inquiry' end else null end"))
+                .withColumn("satisfaction_score", expr("case when support_ticket_id is not null then cast(rand() * 5 + 1 as int) else null end"))
+                
+                # Marketing attribution
+                .withColumn("campaign_id", expr("case when rand() < 0.4 then concat('CMP', cast(rand() * 1000 as int)) else null end"))
+                .withColumn("utm_source", expr("case when campaign_id is not null then case when rand() < 0.3 then 'google' when rand() < 0.6 then 'facebook' when rand() < 0.8 then 'email' else 'direct' end else null end"))
+                .withColumn("utm_medium", expr("case when utm_source is not null then case when rand() < 0.5 then 'cpc' when rand() < 0.8 then 'organic' else 'referral' end else null end"))
+                
+                # Loyalty program data
+                .withColumn("loyalty_member", expr("case when rand() < 0.6 then true else false end"))
+                .withColumn("loyalty_tier", expr("case when loyalty_member then case when rand() < 0.7 then 'bronze' when rand() < 0.9 then 'silver' else 'gold' end else null end"))
+                .withColumn("points_earned", expr("case when loyalty_member and interaction_type = 'purchase' then cast(transaction_amount * 10 as int) else 0 end"))
+                .withColumn("points_redeemed", expr("case when loyalty_member and rand() < 0.1 then cast(rand() * 1000 as int) else 0 end"))
+                
+                # Data quality indicators
+                .withColumn("data_source", expr("case when rand() < 0.7 then 'primary_system' when rand() < 0.85 then 'legacy_import' when rand() < 0.95 then 'manual_entry' else 'third_party_api' end"))
+                .withColumn("data_quality_flag", expr("case when rand() < 0.05 then 'duplicate_suspected' when rand() < 0.1 then 'incomplete_data' when rand() < 0.15 then 'format_inconsistent' else 'clean' end")))
+
+    # Complex payload with customer interaction details
+    payload_expr = sha2(concat_ws("|",
+                                  expr("uuid()"),
+                                  expr("cast(rand() * 1e18 as string)"),
+                                  expr("customer_id"),
+                                  expr("session_id"),
+                                  expr("product_id"),
+                                  expr("cast(unix_timestamp() * 1000000 + rand() * 1000000 as bigint)"),
+                                  expr("interaction_type"),
+                                  expr("channel"),
+                                  expr("hex(cast(rand() * 4294967296 as bigint))"),
+                                  expr("reverse(cast(rand() * 1e16 as string))")
+                                  ), 256)
+    
+    repeat_count = max(1, (payload_kb * 1024) // 64)
+
+    # Enhanced dataset with entropy and customer context
+    df = (base_data.withColumn("interaction_payload", repeat(payload_expr, repeat_count))
+                  .withColumn("entropy_break1", expr("cast(rand() * 999999999999999999 as string)"))
+                  .withColumn("entropy_break2", expr("reverse(hex(cast(rand() * 4294967296 as bigint)))"))
+                  .withColumn("entropy_break3", expr("uuid()"))
+                  .withColumn("raw_user_agent", expr("concat(browser, '/', cast(rand() * 100 + 1 as int), '.', cast(rand() * 10 as int))"))
+                  .withColumn("session_fingerprint", expr("sha2(concat(ip_address, device_type, browser), 256)")))
+
+    log("DataFrame prepared with {} partitions".format(df.rdd.getNumPartitions()))
+    log("Starting write to {}customer/interactions/".format(bronze_uri))
+
+    write_start = time.time()
+    (df.write
+       .mode("overwrite")
+       .option("compression", compression)
+       .option("parquet.block.size", str(files_mb * 1024 * 1024))
+       .option("maxRecordsPerFile", str(files_mb * rows_per_mb))
+       .option("parquet.page.size", "2097152")
+       .parquet(bronze_uri + "customer/interactions/"))
+
+    write_time = time.time() - write_start
+    total_time = time.time() - start_time
+    estimated_gb_written = (rows_total * estimated_row_bytes) / (1024**3)
+    throughput_gbps = estimated_gb_written / write_time if write_time > 0 else 0
+
+    log("Customer 360 Bronze ingest completed!")
+    log("Customer interactions generated: {}".format(rows_total))
+    log("Total time: {:.1f}s, Write time: {:.1f}s".format(total_time, write_time))
+    log("Estimated data written: {:.1f}GB".format(estimated_gb_written))
+    log("Throughput: {:.2f}GB/s".format(throughput_gbps))
+    spark.stop()
+
+  silver_build.py: |
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col, avg, count, sum as sum_, to_date, max as max_, min as min_, first, last, collect_list, regexp_replace, upper, trim, when, isnan, isnull, lower, expr, concat_ws, lit
+    from common import log, env
+    import os
+
+    catalog    = env("MDP_ICEBERG_CATALOG", "ice")
+    bronze_uri = env("MDP_BRONZE_URI", "s3a://mdp-bronze/")
+
+    try:
+        spark = (SparkSession.builder
+                 .appName("mdp-silver-build")
+                 .config("spark.sql.catalog.{}".format(catalog), "org.apache.iceberg.spark.SparkCatalog")
+                 .config("spark.sql.catalog.{}.type".format(catalog), "hive")
+                 .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+                 .getOrCreate())
+    except Exception as e:
+        log("Failed to create SparkSession with Iceberg config, trying basic session: {}".format(str(e)))
+        spark = SparkSession.builder.appName("mdp-silver-build").getOrCreate()
+
+    shuffle_partitions = os.getenv("MDP_SILVER_SHUFFLE_PARTITIONS", "4096")
+    spark.conf.set("spark.sql.shuffle.partitions", shuffle_partitions)
+    log("Customer 360 Silver build starting with shuffle.partitions={}".format(shuffle_partitions))
+
+    log("Loading bronze customer interaction data...")
+    df_bronze = spark.read.parquet(bronze_uri + "customer/interactions/")
+    bronze_count = df_bronze.count()
+    log("Bronze layer contains {} customer interactions".format(bronze_count))
+    
+    if bronze_count == 0:
+        spark.stop()
+        raise SystemExit("Bronze dataset is empty - run Bronze job first")
+
+    try:
+        spark.sql("CREATE NAMESPACE IF NOT EXISTS {}.silver".format(catalog))
+    except Exception as e:
+        log("Namespace creation skipped - will be created automatically: {}".format(str(e)))
+
+    log("Data cleaning and enrichment in progress...")
+    
+    # REALISTIC data cleaning - preserve most data while adding value
+    silver_df = (df_bronze
+                # Light filtering - only remove truly bad data (keeps ~95% of records)
+                .filter(col("data_quality_flag") != "duplicate_suspected")  # Only 5% of data
+                
+                # KEEP ALL ORIGINAL COLUMNS from Bronze for realistic size retention
+                # Add standardized/cleaned versions alongside originals
+                .withColumn("email_clean", regexp_replace(lower(trim(col("email_raw"))), "\\.duplicate", ""))
+                .withColumn("phone_clean", 
+                    regexp_replace(
+                        regexp_replace(col("phone_raw"), "[^0-9]", ""),
+                        "^1?(\\d{10})$", "($1)"
+                    ))
+                
+                # Geographic standardization - keep originals and add cleaned versions
+                .withColumn("state_standardized", 
+                    when(upper(col("state_raw")).isin("CA", "CALIFORNIA"), "CA")
+                    .when(upper(col("state_raw")).isin("TX", "TEXAS"), "TX")
+                    .when(upper(col("state_raw")).isin("NY", "NEW YORK"), "NY")
+                    .otherwise(upper(col("state_raw"))))
+                
+                .withColumn("city_standardized", 
+                    when(upper(col("city_raw")).isin("NEW YORK", "NYC"), "New York")
+                    .otherwise(col("city_raw")))
+                
+                # Add derived metrics (increases data size with enrichment)
+                .withColumn("interaction_date", to_date(col("event_timestamp")))
+                .withColumn("interaction_hour", expr("hour(event_timestamp)"))
+                .withColumn("interaction_day_of_week", expr("dayofweek(event_timestamp)"))
+                .withColumn("interaction_week_of_year", expr("weekofyear(event_timestamp)"))
+                .withColumn("interaction_month", expr("month(event_timestamp)"))
+                .withColumn("is_weekend", expr("dayofweek(event_timestamp) in (1, 7)"))
+                .withColumn("is_business_hours", expr("hour(event_timestamp) between 9 and 17"))
+                .withColumn("is_peak_hours", expr("hour(event_timestamp) between 12 and 14 or hour(event_timestamp) between 18 and 20"))
+                
+                # Customer value segmentation (business intelligence)
+                .withColumn("customer_value_tier", 
+                    when(col("transaction_amount") > 500, "high_value")
+                    .when(col("transaction_amount") > 100, "medium_value")
+                    .when(col("transaction_amount") > 0, "low_value")
+                    .otherwise("browser_only"))
+                
+                .withColumn("transaction_size_category",
+                    when(col("transaction_amount") > 1000, "large")
+                    .when(col("transaction_amount") > 250, "medium")
+                    .when(col("transaction_amount") > 0, "small")
+                    .otherwise("none"))
+                
+                # Behavioral analytics (adds significant business value)
+                .withColumn("engagement_score", 
+                    expr("case when page_views = 0 then 0 when page_views <= 2 then 1 when page_views <= 5 then 2 when page_views <= 10 then 3 else 4 end"))
+                
+                .withColumn("session_depth_category",
+                    when(col("page_views") > 10, "deep")
+                    .when(col("page_views") > 3, "medium")
+                    .when(col("page_views") > 0, "shallow")
+                    .otherwise("bounce"))
+                
+                .withColumn("time_spent_category",
+                    when(col("time_on_site_seconds") > 1800, "long")
+                    .when(col("time_on_site_seconds") > 300, "medium")
+                    .when(col("time_on_site_seconds") > 0, "short")
+                    .otherwise("none"))
+                
+                .withColumn("channel_preference", 
+                    when(col("channel") == "mobile_app", "mobile_first")
+                    .when(col("channel") == "web", "web_first")
+                    .when(col("channel") == "store", "physical_first")
+                    .otherwise("omnichannel"))
+                
+                # Advanced customer analytics (ML features)
+                .withColumn("lifetime_value_estimate", expr("transaction_amount * (1 + points_earned/1000.0)"))
+                .withColumn("customer_recency_score", expr("30 - datediff(current_date(), interaction_date)"))
+                .withColumn("engagement_velocity", expr("page_views / greatest(time_on_site_seconds/60.0, 1.0)"))
+                
+                .withColumn("churn_risk_indicator", 
+                    when(col("satisfaction_score") <= 2, "high_risk")
+                    .when(col("satisfaction_score") <= 3, "medium_risk")
+                    .when(col("satisfaction_score").isNull(), "unknown_risk")
+                    .otherwise("low_risk"))
+                
+                # Marketing attribution (critical for business)
+                .withColumn("attribution_channel", 
+                    when(col("utm_source").isNotNull(), col("utm_source"))
+                    .otherwise("direct"))
+                
+                .withColumn("attribution_quality",
+                    when(col("utm_source").isNotNull() & col("utm_medium").isNotNull(), "high")
+                    .when(col("utm_source").isNotNull(), "medium")
+                    .otherwise("low"))
+                
+                .withColumn("customer_journey_stage", 
+                    when(col("interaction_type") == "browse", "awareness")
+                    .when(col("interaction_type") == "abandoned_cart", "consideration")
+                    .when(col("interaction_type") == "purchase", "conversion")
+                    .when(col("interaction_type") == "support", "retention")
+                    .otherwise("other"))
+                
+                # Device and technical context (for personalization)
+                .withColumn("device_category",
+                    when(col("device_type") == "mobile", "mobile")
+                    .when(col("device_type") == "tablet", "tablet")
+                    .otherwise("desktop"))
+                
+                .withColumn("browser_family",
+                    when(col("browser").like("%chrome%"), "chromium")
+                    .when(col("browser").like("%safari%"), "webkit")
+                    .when(col("browser").like("%firefox%"), "gecko")
+                    .otherwise("other"))
+                
+                # Interaction context enrichment
+                .withColumn("interaction_context", 
+                    concat_ws("|", col("device_type"), col("browser"), col("channel")))
+                
+                .withColumn("full_context_fingerprint",
+                    concat_ws(":", col("device_category"), col("browser_family"), col("channel"), 
+                              col("attribution_channel"), col("customer_value_tier")))
+                
+                # CRITICAL: Keep the large payload columns that maintain dataset size
+                .withColumn("interaction_payload_clean", col("interaction_payload"))
+                .withColumn("enriched_payload", 
+                    concat_ws("|", col("interaction_payload"), col("full_context_fingerprint"), 
+                              expr("cast(unix_timestamp() as string)")))
+                
+                # Data lineage and processing metadata
+                .withColumn("data_lineage", lit("silver_enriched_v2"))
+                .withColumn("processing_timestamp", expr("current_timestamp()"))
+                .withColumn("data_quality_score", 
+                    when(col("data_quality_flag") == "clean", 1.0)
+                    .when(col("data_quality_flag") == "format_inconsistent", 0.8)
+                    .when(col("data_quality_flag") == "incomplete_data", 0.6)
+                    .otherwise(0.3)))
+
+    silver_count = silver_df.count()
+    log("Silver enriched interactions: {} records (realistic data growth with enrichment)".format(silver_count))
+
+    silver_tbl = "{}.silver.customer_interactions_enriched".format(catalog)
+    log("Writing enriched dataset to Iceberg table: {}".format(silver_tbl))
+    
+    try:
+        (silver_df.writeTo(silver_tbl)
+                  .partitionedBy("interaction_date", "channel")
+                  .createOrReplace())
+        log("Successfully wrote enriched dataset to Iceberg table")
+    except Exception as e:
+        log("Iceberg table creation failed: {}".format(str(e)))
+        log("Falling back to parquet output...")
+        # Fallback: write as partitioned parquet
+        parquet_path = bronze_uri.replace("bronze", "silver") + "customer_interactions_enriched/"
+        (silver_df.write
+                  .mode("overwrite")
+                  .partitionBy("interaction_date", "channel")
+                  .parquet(parquet_path))
+        log("Successfully wrote enriched dataset to parquet: {}".format(parquet_path))
+
+    log("Customer 360 Silver build completed successfully")
+    spark.stop()
+
+  gold_finalize.py: |
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import col, avg, sum as sum_, max as max_, min as min_, count, countDistinct, first, desc, when
+    from common import log, env
+
+    catalog = env("MDP_ICEBERG_CATALOG", "ice")
+
+    spark = (SparkSession.builder
+             .appName("mdp-gold-finalize")
+             .config("spark.sql.catalog.{}".format(catalog), "org.apache.iceberg.spark.SparkCatalog")
+             .config("spark.sql.catalog.{}.type".format(catalog), "hive")
+             .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+             .getOrCreate())
+
+    log("Customer 360 Gold finalization starting...")
+    
+    try:
+        spark.sql("CREATE NAMESPACE IF NOT EXISTS {}.gold".format(catalog))
+    except Exception as e:
+        log("Namespace creation skipped - will be created automatically: {}".format(str(e)))
+
+    silver_tbl = "{}.silver.customer_interactions_enriched".format(catalog)
+    gold_tbl   = "{}.gold.customer_executive_dashboard".format(catalog)
+
+    log("Reading silver customer interaction data...")
+    df = spark.table(silver_tbl)
+    
+    silver_count = df.count()
+    log("Silver table contains {} enriched customer interactions".format(silver_count))
+    
+    if silver_count == 0:
+        spark.stop()
+        raise SystemExit("Silver table is empty - run Silver job first")
+    
+    log("Building executive customer KPIs...")
+    
+    # Executive dashboard aggregations
+    daily_kpis = (df.groupBy("interaction_date")
+                  .agg(
+                      countDistinct("customer_id").alias("daily_active_customers"),
+                      countDistinct("email_clean").alias("unique_email_addresses"),
+                      sum("transaction_amount").alias("total_daily_revenue"),
+                      avg("transaction_amount").alias("avg_transaction_value"),
+                      max("transaction_amount").alias("largest_transaction"),
+                      count(col("transaction_amount") > 0).alias("total_transactions"),
+                      sum(when(col("channel") == "web", col("transaction_amount")).otherwise(0)).alias("web_revenue"),
+                      sum(when(col("channel") == "mobile_app", col("transaction_amount")).otherwise(0)).alias("mobile_revenue"),
+                      sum(when(col("channel") == "store", col("transaction_amount")).otherwise(0)).alias("store_revenue"),
+                      avg("engagement_score").alias("avg_engagement_score"),
+                      avg("time_on_site_seconds").alias("avg_time_on_site"),
+                      count(col("customer_journey_stage") == "conversion").alias("daily_conversions"),
+                      count(col("loyalty_member") == True).alias("loyalty_member_interactions"),
+                      sum("points_earned").alias("total_points_earned"),
+                      sum("points_redeemed").alias("total_points_redeemed"),
+                      countDistinct("support_ticket_id").alias("support_tickets_created"),
+                      avg("satisfaction_score").alias("avg_satisfaction_score"),
+                      count(col("churn_risk_indicator") == "high_risk").alias("high_churn_risk_customers"),
+                      sum("lifetime_value_estimate").alias("total_estimated_ltv")
+                  ))
+    
+    kpi_count = daily_kpis.count()
+    log("Gold Customer KPIs: {} daily executive summaries".format(kpi_count))
+    
+    log("Writing customer executive dashboard to gold Iceberg table...")
+    (daily_kpis.writeTo(gold_tbl)
+               .partitionedBy("interaction_date")
+               .createOrReplace())
+    
+    log("Customer 360 Gold finalization completed successfully")
+    spark.stop()
+
+  smoke.py: |
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import lit
+    from common import log
+    import time
+    
+    log("Starting S3 connectivity smoke test...")
+    spark = SparkSession.builder.appName("mdp-smoke").getOrCreate()
+    
+    start_time = time.time()
+    log("Creating test dataset...")
+    df = spark.range(100).toDF("test_id")
+    df = df.withColumn("test_data", lit("smoke_test_data_12345"))
+    
+    log("Testing S3 write capability...")
+    df.write.mode("overwrite").parquet("s3a://mdp-bronze/_smoke/")
+    write_time = time.time() - start_time
+    
+    log("Testing S3 read capability...")
+    read_start = time.time()
+    result_df = spark.read.parquet("s3a://mdp-bronze/_smoke/")
+    row_count = result_df.count()
+    read_time = time.time() - read_start
+    total_time = time.time() - start_time
+    
+    if row_count == 100:
+        log("Smoke test SUCCESSFUL: wrote and read {} rows".format(row_count))
+        log("Write time: {:.2f}s, Read time: {:.2f}s, Total: {:.2f}s".format(write_time, read_time, total_time))
+        print("SMOKE_OK 100")
+    else:
+        log("Smoke test FAILED: Row count mismatch: expected 100, got {}".format(row_count))
+        print("SMOKE_FAIL Row count mismatch")
+    
+    spark.stop()

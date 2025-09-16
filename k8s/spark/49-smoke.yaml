@@ -1,0 +1,37 @@
+apiVersion: spark.stackable.tech/v1alpha1
+kind: SparkApplication
+metadata:
+  name: mdp-smoke
+  namespace: md-pipeline
+spec:
+  mode: cluster
+  serviceAccount: spark-runner
+  sparkImage:
+    productVersion: "3.5.6"
+  mainApplicationFile: local:///opt/scripts/smoke.py
+  volumes:
+    - name: scripts
+      configMap: { name: mdp-spark-scripts }
+  driver:
+    cores: 1
+    memory: 1Gi
+    config:
+      volumeMounts: [{ name: scripts, mountPath: /opt/scripts }]
+  executor:
+    instances: 1
+    cores: 1
+    memory: 2Gi
+    config:
+      volumeMounts: [{ name: scripts, mountPath: /opt/scripts }]
+  env:
+    - { name: PYTHONPATH, value: "/opt/scripts" }
+  s3connection:
+    inline:
+      host: 10.21.227.158
+      port: 80
+      accessStyle: Path
+      credentials: { secretClass: mdp-s3-credentials-class }
+  sparkConf:
+    spark.hadoop.fs.s3a.endpoint: "http://10.21.227.158:80"
+    spark.hadoop.fs.s3a.path.style.access: "true"
+    spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"

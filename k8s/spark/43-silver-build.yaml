@@ -1,0 +1,126 @@
+apiVersion: spark.stackable.tech/v1alpha1
+kind: SparkApplication
+metadata:
+  name: mdp-silver-build
+  namespace: md-pipeline
+spec:
+  mode: cluster
+  serviceAccount: spark-runner
+  sparkImage: 
+    productVersion: "3.5.6"
+  mainApplicationFile: local:///opt/scripts/silver_build.py
+  volumes: 
+    - name: scripts
+      configMap: 
+        name: mdp-spark-scripts
+  driver:
+    cores: 8
+    memory: 16Gi
+    config: 
+      volumeMounts: 
+        - name: scripts
+          mountPath: /opt/scripts
+  dynamicAllocation:
+    enabled: false
+  executor:
+    cores: 4
+    memory: 16Gi
+    config: 
+      volumeMounts: 
+        - name: scripts
+          mountPath: /opt/scripts
+  env:
+    - name: PYTHONPATH
+      value: "/opt/scripts"
+    - name: MDP_ICEBERG_CATALOG
+      value: "ice"
+    - name: MDP_BRONZE_URI
+      value: "s3a://mdp-bronze/"
+    - name: MDP_SILVER_SHUFFLE_PARTITIONS
+      value: "4096"
+  s3connection:
+    inline:
+      host: 10.21.227.158
+      port: 80
+      accessStyle: Path
+      credentials: 
+        secretClass: mdp-s3-credentials-class
+  sparkConf:
+    # Iceberg and Hive integration
+    spark.jars.packages: "org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1"
+    spark.sql.extensions: "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions"
+    spark.sql.catalog.ice: "org.apache.iceberg.spark.SparkCatalog"
+    spark.sql.catalog.ice.type: "hive"
+    spark.sql.catalog.ice.uri: "thrift://mdp-hive-metastore.md-pipeline.svc.cluster.local:9083"
+    spark.sql.catalog.ice.warehouse: "s3a://mdp-silver/"
+    spark.sql.catalog.ice.s3.endpoint: "http://10.21.227.158:80"
+    spark.sql.catalog.ice.s3.path-style-access: "true"
+
+    # S3A filesystem configuration
+    spark.hadoop.fs.s3a.endpoint: "http://10.21.227.158:80"
+    spark.hadoop.fs.s3a.path.style.access: "true"
+    spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    
+    # S3A performance optimizations
+    spark.hadoop.fs.s3a.fast.upload: "true"
+    spark.hadoop.fs.s3a.fast.upload.buffer: "bytebuffer"
+    spark.hadoop.fs.s3a.multipart.size: "134217728"
+    spark.hadoop.fs.s3a.multipart.threshold: "134217728"
+    spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
+    spark.hadoop.fs.s3a.connection.maximum: "1024"
+    spark.hadoop.fs.s3a.threads.max: "512"
+    spark.hadoop.fs.s3a.connection.request.timeout: "60000"
+    spark.hadoop.fs.s3a.connection.timeout: "60000"
+    spark.hadoop.fs.s3a.attempts.maximum: "5"
+    spark.hadoop.fs.s3a.retry.limit: "5"
+
+    # Iceberg-specific configurations
+    spark.sql.iceberg.handle-timestamp-without-timezone: "true"
+    spark.sql.sources.commitProtocolClass: "org.apache.iceberg.spark.source.SparkCommitProtocol"
+    
+    # Hive Metastore connection pool tuning
+    spark.hadoop.javax.jdo.option.ConnectionPool.maxPoolSize: "5"
+    spark.hadoop.javax.jdo.option.ConnectionPool.maxActive: "3"
+    spark.hadoop.javax.jdo.option.ConnectionPool.maxIdle: "2"
+    spark.hadoop.javax.jdo.option.ConnectionTimeout: "30000"
+    spark.hadoop.javax.jdo.option.ConnectionPoolingType: "DBCP"
+    spark.hadoop.hive.metastore.client.socket.timeout: "300s"
+    spark.sql.catalog.ice.hive.metastore-timeout: "5m"
+    spark.sql.catalog.ice.hive.client-pool-size: "2"
+    
+    # Large payload handling optimizations
+    spark.sql.parquet.enableVectorizedReader: "false"
+    spark.sql.parquet.columnarReaderBatchSize: "1024"
+    spark.sql.execution.arrow.maxRecordsPerBatch: "1024"
+    spark.sql.adaptive.advisoryPartitionSizeInBytes: "64MB"
+    spark.sql.files.maxPartitionBytes: "134217728"
+    
+    # Spark performance tuning for aggregation workload
+    spark.sql.shuffle.partitions: "4096"
+    spark.sql.adaptive.enabled: "true"
+    spark.sql.adaptive.coalescePartitions.enabled: "true"
+    spark.sql.adaptive.skewJoin.enabled: "true"
+    
+    # Memory and performance tuning
+    spark.executor.memoryOverhead: "4096"
+    spark.driver.memoryOverhead: "4096"
+    spark.network.timeout: "1800s"
+    spark.executor.heartbeatInterval: "60s"
+    
+    # Kubernetes executor management
+    spark.dynamicAllocation.enabled: "false"
+    spark.executor.instances: "32"
+    spark.kubernetes.executor.deleteOnTermination: "false"
+    spark.kubernetes.allocation.batch.size: "24"
+    spark.kubernetes.allocation.podCreation.parallelism: "24"
+    
+    # JVM optimizations for large payloads
+    spark.executor.extraJavaOptions: "-XX:+UseG1GC -XX:MaxDirectMemorySize=4g -XX:MaxMetaspaceSize=1g"
+    spark.driver.extraJavaOptions: "-XX:+UseG1GC -XX:MaxDirectMemorySize=4g -XX:MaxMetaspaceSize=1g"
+    
+    # Network and RPC configurations for stability
+    spark.rpc.askTimeout: "1200s"
+    spark.rpc.lookupTimeout: "120s"
+    spark.kubernetes.driver.service.account: "spark-runner"
+    spark.kubernetes.executor.service.account: "spark-runner"
+    spark.kubernetes.authenticate.driver.serviceAccountName: "spark-runner"

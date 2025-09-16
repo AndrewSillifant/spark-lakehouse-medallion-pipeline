@@ -1,0 +1,109 @@
+apiVersion: spark.stackable.tech/v1alpha1
+kind: SparkApplication
+metadata:
+  name: mdp-bronze-ingest
+  namespace: md-pipeline
+spec:
+  mode: cluster
+  serviceAccount: spark-runner
+  sparkImage:
+    productVersion: "3.5.6"
+  mainApplicationFile: local:///opt/scripts/bronze_ingest.py
+  volumes:
+    - name: scripts
+      configMap:
+        name: mdp-spark-scripts
+  driver:
+    cores: 4
+    memory: 8Gi     
+    config:
+      volumeMounts:
+        - name: scripts
+          mountPath: /opt/scripts
+  dynamicAllocation:
+    enabled: false
+  executor:
+    cores: 2
+    memory: 32Gi    
+    config:
+      volumeMounts:
+        - name: scripts
+          mountPath: /opt/scripts
+  env:
+    - name: PYTHONPATH
+      value: "/opt/scripts"
+    - name: MDP_BRONZE_URI
+      value: "s3a://mdp-bronze/"
+    - name: MDP_INGEST_GB
+      value: "1024"
+    - name: MDP_INGEST_PARTITIONS
+      value: "768"
+    - name: MDP_TARGET_FILE_MB
+      value: "256"
+    - name: MDP_PARQUET_COMPRESSION
+      value: "none"
+    - name: MDP_PAYLOAD_KB
+      value: "256"      
+    - name: MDP_ROWS_PER_MB
+      value: "1"
+  s3connection:
+    inline:
+      host: 10.21.227.158
+      port: 80
+      accessStyle: Path
+      credentials:
+        secretClass: mdp-s3-credentials-class
+  sparkConf:
+    spark.hadoop.fs.s3a.endpoint: "http://10.21.227.158:80"
+    spark.hadoop.fs.s3a.path.style.access: "true"
+    spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
+    
+    # S3A configuration for maximum throughput
+    spark.hadoop.fs.s3a.fast.upload: "true"
+    spark.hadoop.fs.s3a.fast.upload.buffer: "bytebuffer"
+    spark.hadoop.fs.s3a.multipart.size: "268435456"      # 256MB multipart
+    spark.hadoop.fs.s3a.multipart.threshold: "268435456"
+    spark.hadoop.fs.s3a.fast.upload.active.blocks: "16"
+    spark.hadoop.fs.s3a.connection.maximum: "2048"
+    spark.hadoop.fs.s3a.threads.max: "1024"
+    spark.hadoop.fs.s3a.max.total.tasks: "4096"
+    spark.hadoop.fs.s3a.connection.request.timeout: "60000"
+    spark.hadoop.fs.s3a.connection.timeout: "60000"
+    spark.hadoop.fs.s3a.attempts.maximum: "5"
+    spark.hadoop.fs.s3a.retry.limit: "5"
+    
+    # Parallelism for 48 executors × 2 cores
+    spark.sql.shuffle.partitions: "768"
+    spark.sql.files.maxPartitionBytes: "268435456"
+    
+    # Memory and performance tuning
+    spark.executor.memoryOverhead: "8192"
+    spark.driver.memoryOverhead: "2048"
+    spark.network.timeout: "1800s"
+    spark.executor.heartbeatInterval: "60s"
+    spark.sql.adaptive.enabled: "false"
+    
+    # Kubernetes executor management
+    spark.dynamicAllocation.enabled: "false"
+    spark.executor.instances: "64"
+    spark.kubernetes.executor.deleteOnTermination: "false"
+    spark.kubernetes.allocation.batch.size: "16"
+    spark.kubernetes.allocation.podCreation.parallelism: "16"
+    
+    # Parquet optimizations
+    spark.sql.parquet.compression.codec: "lz4"
+    spark.sql.parquet.output.committer.class: "org.apache.parquet.hadoop.ParquetOutputCommitter"
+    spark.hadoop.mapreduce.fileoutputcommitter.algorithm.version: "2"
+    spark.hadoop.mapreduce.fileoutputcommitter.cleanup-failures.ignored: "true"
+    spark.hadoop.mapreduce.fileoutputcommitter.marksuccessfuljobs: "false"
+    
+    # FIXED JVM options - removed Xmx settings that conflict with memory specs
+    spark.executor.extraJavaOptions: "-XX:+UseG1GC -XX:MaxDirectMemorySize=8g -XX:MaxMetaspaceSize=512m"
+    spark.driver.extraJavaOptions: "-XX:+UseG1GC -XX:MaxDirectMemorySize=4g"
+    
+    # Network and RPC configurations for stability
+    spark.rpc.askTimeout: "1200s"
+    spark.rpc.lookupTimeout: "120s"
+    spark.kubernetes.driver.service.account: "spark-runner"
+    spark.kubernetes.executor.service.account: "spark-runner"
+    spark.kubernetes.authenticate.driver.serviceAccountName: "spark-runner"

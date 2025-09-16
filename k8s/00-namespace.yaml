@@ -1,0 +1,8 @@
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: md-pipeline
+  labels:
+    app.kubernetes.io/name: md-pipeline
+    app.kubernetes.io/component: medallion-bench-pipeline
